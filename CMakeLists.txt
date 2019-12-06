@@ -3,4 +3,4 @@ project(cenutrio C)
 
 set(CMAKE_C_STANDARD 99)
 
-add_executable(cenutrio main.c)
+add_executable(cenutrio hello/main.c)
