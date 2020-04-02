@@ -1,5 +1,5 @@
 #include <stdio.h>
-#include "fdlibm.h"
+//#include "fdlibm.h"
 
 int main() {
     double num = 0.0;
