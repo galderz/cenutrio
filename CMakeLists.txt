@@ -18,3 +18,5 @@ set_target_properties(libfdlibm PROPERTIES IMPORTED_LOCATION "/Users/g/1/jawa/su
 add_executable(fdlibm fdlibm/fdlibm.c)
 include_directories("/Users/g/1/jawa/substratevm/clibraries/target/src/fdlibm")
 target_link_libraries(fdlibm libfdlibm)
+
+add_executable(e_log e_log/e_log.c)
