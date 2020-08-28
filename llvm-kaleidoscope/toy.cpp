@@ -569,7 +569,6 @@ static void MainLoop() {
         fprintf(stderr, "ready> ");
         switch (CurTok) {
             case tok_eof:
-                fprintf(stderr, "emitted EOF");
                 return;
             case ';': // ignore top-level semicolons.
                 getNextToken();
