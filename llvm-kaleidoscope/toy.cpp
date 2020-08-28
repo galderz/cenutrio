@@ -218,6 +218,7 @@ static std::unique_ptr<Module> TheModule;
 static std::map<std::string, Value *> NamedValues;
 static std::unique_ptr<legacy::FunctionPassManager> TheFPM;
 static std::unique_ptr<KaleidoscopeJIT> TheJIT;
+static std::map<std::string, std::unique_ptr<PrototypeAST>> FunctionProtos;
 
 Value *LogErrorV(const char *Str) {
     LogError(Str);
@@ -260,9 +261,25 @@ Value *BinaryExprAST::codegen() {
     }
 }
 
+Function *getFunction(std::string Name) {
+    // First,
+    // see if the function has already been added to the current module.
+    if (auto *F = TheModule->getFunction(Name))
+        return F;
+
+    // If not,
+    // check whether we can codegen the declaration from some existing prototype.
+    auto FI = FunctionProtos.find(Name);
+    if (FI != FunctionProtos.end())
+        return FI->second->codegen();
+
+    // If no existing prototype exists, return null.
+    return nullptr;
+}
+
 Value *CallExprAST::codegen() {
     // Look up the name in the global module table.
-    Function *CalleeF = TheModule->getFunction(Callee);
+    Function *CalleeF = getFunction(Callee);
     if (!CalleeF)
         return LogErrorV("Unknown function referenced");
 
@@ -301,10 +318,9 @@ Function *PrototypeAST::codegen() {
 
 Function *FunctionAST::codegen() {
     // First, check for an existing function from a previous 'extern' declaration.
-    Function *TheFunction = TheModule->getFunction(Proto->getName());
-
-    if (!TheFunction)
-        TheFunction = Proto->codegen();
+    auto &P = *Proto;
+    FunctionProtos[Proto->getName()] = std::move(Proto);
+    Function *TheFunction = getFunction(P.getName());
 
     if (!TheFunction)
         return nullptr;
@@ -568,6 +584,8 @@ static void HandleDefinition() {
             fprintf(stderr, "Read function definition:");
             FnIR->print(errs());
             fprintf(stderr, "\n");
+            TheJIT->addModule(std::move(TheModule));
+            InitializeModuleAndPassManager();
         }
     } else {
         // Skip token for error recovery.
@@ -581,7 +599,9 @@ static void HandleExtern() {
             fprintf(stderr, "Read extern: ");
             FnIR->print(errs());
             fprintf(stderr, "\n");
-    }    } else {
+            FunctionProtos[ProtoAST->getName()] = std::move(ProtoAST);
+        }
+    } else {
         // Skip token for error recovery.
         getNextToken();
     }
@@ -785,3 +805,11 @@ int main() {
 // ready> testfunc(5, 10);
 // ready> LogError: Unknown function referenced
 // ^ expected failure
+
+// Chapter 4 - Each function in its own module
+// ready> def foo(x) x + 1;
+// ready> foo(2);
+// Evaluated to 3.000000
+// ready> def foo(x) x + 2;
+// ready> foo(2);
+// Evaluated to 4.000000
