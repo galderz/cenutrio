@@ -11,5 +11,8 @@ compile:
 # TODO chapter 3 recommending the following, does it work?
 # clang++ -g -O3 toy.cpp `llvm-config --cxxflags --ldflags --system-libs --libs core` -o toy
 
+# TODO chapter 4 recommending the following:
+# clang++ -g toy.cpp `llvm-config --cxxflags --ldflags --system-libs --libs core mcjit native` -O3 -o toy
+
 run:
 	./toy
