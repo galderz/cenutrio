@@ -1,4 +1,14 @@
+#include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Type.h"
+#include "llvm/IR/Verifier.h"
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -7,6 +17,8 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+using namespace llvm;
 
 enum Token {
     tok_eof = -1,
@@ -84,6 +96,8 @@ namespace {
 class ExprAST {
 public:
     virtual ~ExprAST() {}
+
+    virtual Value *codegen() = 0;
 };
 
 /// NumberExprAST - Expression class for numeric literals like "1.0".
@@ -92,6 +106,8 @@ class NumberExprAST : public ExprAST {
 
 public:
     NumberExprAST(double Val) : Val(Val) {}
+
+    Value *codegen() override;
 };
 
 /// VariableExprAST - Expression class for referencing a variable, like "a".
@@ -100,6 +116,8 @@ class VariableExprAST : public ExprAST {
 
 public:
     VariableExprAST(const std::string &Name) : Name(Name) {}
+
+    Value *codegen() override;
 };
 
 /// BinaryExprAST - Expression class for a binary operator.
@@ -111,6 +129,8 @@ public:
     BinaryExprAST(char op, std::unique_ptr<ExprAST> LHS,
                   std::unique_ptr<ExprAST> RHS)
        : Op(op), LHS(std::move(LHS)), RHS(std::move(RHS)) {}
+
+    Value *codegen() override;
 };
 
 class CallExprAST : public ExprAST {
@@ -121,6 +141,8 @@ public:
     CallExprAST(const std::string &Callee,
                 std::vector<std::unique_ptr<ExprAST>> Args)
        : Callee(Callee), Args(std::move(Args)) {}
+
+    Value *codegen() override;
 };
 
 /// PrototypeAST - This class represents the "prototype" for a function,
@@ -135,6 +157,7 @@ public:
     PrototypeAST(const std::string &name, std::vector<std::string> Args)
        : Name(name), Args(std::move(Args)) {}
 
+    Function *codegen();
     const std::string &getName() const { return Name; }
 };
 
@@ -147,6 +170,8 @@ public:
     FunctionAST(std::unique_ptr<PrototypeAST> Proto,
                 std::unique_ptr<ExprAST> Body)
        : Proto(std::move(Proto)), Body(std::move(Body)) {}
+
+    Function *codegen();
 };
 
 } // end anonymous namespace
@@ -170,6 +195,129 @@ std::unique_ptr<ExprAST> LogError(const char *Str) {
 }
 std::unique_ptr<PrototypeAST> LogErrorP(const char *Str) {
     LogError(Str);
+    return nullptr;
+}
+
+static LLVMContext TheContext;
+static IRBuilder<> Builder(TheContext);
+static std::unique_ptr<Module> TheModule;
+static std::map<std::string, Value *> NamedValues;
+
+Value *LogErrorV(const char *Str) {
+    LogError(Str);
+    return nullptr;
+}
+
+Value *NumberExprAST::codegen() {
+    return ConstantFP::get(TheContext, APFloat(Val));
+}
+
+Value *VariableExprAST::codegen() {
+    // Look this variable up in the function.
+    Value *V = NamedValues[Name];
+    if (!V)
+        LogErrorV("Unknown variable name");
+    return V;
+}
+
+Value *BinaryExprAST::codegen() {
+    Value *L = LHS->codegen();
+    Value *R = RHS->codegen();
+    if (!L || !R)
+        return nullptr;
+
+    switch (Op) {
+        case '+':
+            return Builder.CreateFAdd(L, R, "addtmp");
+        case '-':
+            return Builder.CreateFSub(L, R, "subtmp");
+        case '*':
+            return Builder.CreateFMul(L, R, "multmp");
+        case '<':
+            L = Builder.CreateFCmpULT(L, R, "cmptmp");
+            // Convert bool 0/1 to double 0.0 or 1.0
+            return Builder.CreateUIToFP(L,
+                                        Type::getDoubleTy(TheContext),
+                                        "boottmp");
+        default:
+            return LogErrorV("invalid binary operator");
+    }
+}
+
+Value *CallExprAST::codegen() {
+    // Look up the name in the global module table.
+    Function *CalleeF = TheModule->getFunction(Callee);
+    if (!CalleeF)
+        return LogErrorV("Unknown function referenced");
+
+    // If argument mismatch error.
+    if (CalleeF->arg_size() != Args.size())
+        return LogErrorV("Incorrect # arguments passed");
+
+    std::vector<Value *> ArgsV;
+    for (unsigned i = 0, e = Args.size(); i != e; ++i) {
+        ArgsV.push_back(Args[i]->codegen());
+        if (!ArgsV.back())
+            return nullptr;
+    }
+
+    return Builder.CreateCall(CalleeF, ArgsV, "calltmp");
+}
+
+Function *PrototypeAST::codegen() {
+    // Make the function type:  double(double,double) etc.
+    std::vector<Type*> Doubles(Args.size(),
+                               Type::getDoubleTy(TheContext));
+
+    FunctionType *FT =
+            FunctionType::get(Type::getDoubleTy(TheContext), Doubles, false);
+
+    Function *F =
+            Function::Create(FT, Function::ExternalLinkage, Name, TheModule.get());
+
+    // Set names for all arguments
+    unsigned Idx = 0;
+    for (auto &Arg : F->args())
+        Arg.setName(Args[Idx++]);
+
+    return F;
+}
+
+Function *FunctionAST::codegen() {
+    // First, check for an existing function from a previous 'extern' declaration.
+    Function *TheFunction = TheModule->getFunction(Proto->getName());
+
+    if (!TheFunction)
+        TheFunction = Proto->codegen();
+
+    if (!TheFunction)
+        return nullptr;
+
+    if (!TheFunction->empty())
+        return (Function*)LogErrorV("Function cannot be redefined.");
+
+    // Create a new basic block to start insertion into.
+    BasicBlock *BB = BasicBlock::Create(TheContext, "entry", TheFunction);
+    Builder.SetInsertPoint(BB);
+
+    // Record the function arguments in the NamedValues map.
+    NamedValues.clear();
+    // TODO fix chapter 3 documentation in Arg.getName() call
+    for (auto &Arg : TheFunction->args())
+        NamedValues[std::string(Arg.getName())] = &Arg;
+
+    if (Value *RetVal = Body->codegen()) {
+        // Finish off the function.
+        Builder.CreateRet(RetVal);
+
+        // Validate the generated code, checking for consistency.
+        verifyFunction(*TheFunction);
+
+        return TheFunction;
+    }
+
+    // Error reading body, remove function.
+    TheFunction->eraseFromParent();
     return nullptr;
 }
 
@@ -377,8 +525,12 @@ static std::unique_ptr<FunctionAST> ParseTopLevelExpr() {
 //===----------------------------------------------------------------------===//
 
 static void HandleDefinition() {
-    if (ParseDefinition()) {
-        fprintf(stderr, "Parsed a function definition.\n");
+    if (auto FnAST = ParseDefinition()) {
+        if (auto *FnIR = FnAST->codegen()) {
+            fprintf(stderr, "Read function definition:");
+            FnIR->print(errs());
+            fprintf(stderr, "\n");
+        }
     } else {
         // Skip token for error recovery.
         getNextToken();
@@ -386,9 +538,12 @@ static void HandleDefinition() {
 }
 
 static void HandleExtern() {
-    if (ParseExtern()) {
-        fprintf(stderr, "Parsed an extern\n");
-    } else {
+    if (auto ProtoAST = ParseExtern()) {
+        if (auto *FnIR = ProtoAST->codegen()) {
+            fprintf(stderr, "Read extern: ");
+            FnIR->print(errs());
+            fprintf(stderr, "\n");
+    }    } else {
         // Skip token for error recovery.
         getNextToken();
     }
@@ -396,8 +551,12 @@ static void HandleExtern() {
 
 static void HandleTopLevelExpression() {
     // Evaluate a top-level expression into an anonymous function.
-    if (ParseTopLevelExpr()) {
-        fprintf(stderr, "Parsed a top-level expr\n");
+    if (auto FnAST = ParseTopLevelExpr()) {
+        if (auto *FnIR = FnAST->codegen()) {
+            fprintf(stderr, "Read top-level expression:");
+            FnIR->print(errs());
+            fprintf(stderr, "\n");
+        }
     } else {
         // Skip token for error recovery.
         getNextToken();
@@ -409,21 +568,22 @@ static void MainLoop() {
     while (1) {
         fprintf(stderr, "ready> ");
         switch (CurTok) {
-        case tok_eof:
-            return;
-        case ';': // ignore top-level semicolons.
-            getNextToken();
-            break;
-        case tok_def:
-            HandleDefinition();
-            break;
-        case tok_extern:
-            HandleExtern();
-            break;
-        default:
-            HandleTopLevelExpression();
-            break;
-        }
+            case tok_eof:
+                fprintf(stderr, "emitted EOF");
+                return;
+            case ';': // ignore top-level semicolons.
+                getNextToken();
+                break;
+            case tok_def:
+                HandleDefinition();
+                break;
+            case tok_extern:
+                HandleExtern();
+                break;
+            default:
+                HandleTopLevelExpression();
+                break;
+            }
     }
 }
 
@@ -439,14 +599,25 @@ int main() {
     fprintf(stderr, "ready> ");
     getNextToken();
 
+    // TODO not mentioned in chapter 3 documentation
+    // Make the module, which holds all the code.
+    TheModule = std::make_unique<Module>("my cool jit", TheContext);
+
     // Run the main "interpreter loop" now.
     MainLoop();
+
+    // Print out all of the generated code.
+    //
+    // In ZSH, call `unsetopt ignoreeof` to see this executed after Ctrl+D
+    // see https://superuser.com/a/979054/131943
+    TheModule->print(errs(), nullptr);
 
     return 0;
 }
 
-// To try, run:
-//$ ./a.out
+// Chapter 1+2 test:
+//
+// $ ./a.out
 // ready> def foo(x y) x+foo(y, 4.0);
 // Parsed a function definition.
 //
@@ -460,3 +631,43 @@ int main() {
 //
 // ready> extern sin(a);
 // ready> Parsed an extern
+
+// Chapter 3 test:
+//
+// $ ./a.out
+// ready> 4+5;
+// ready> Read top-level expression:
+// define double @0() {
+// entry:
+//   ret double 9.000000e+00
+// }
+//
+// ready> def foo(a b) a*a + 2*a*b + b*b;
+// ready> Read function definition:define double @foo(double %a, double %b) {
+// entry:
+//   %multmp = fmul double %a, %a
+//   %multmp1 = fmul double 2.000000e+00, %a
+//   %multmp2 = fmul double %multmp1, %b
+//   %addtmp = fadd double %multmp, %multmp2
+//   %multmp3 = fmul double %b, %b
+//   %addtmp4 = fadd double %addtmp, %multmp3
+//   ret double %addtmp4
+// }
+//
+// ready> def bar(a) foo(a, 4.0) + bar(31337);
+// ready> Read function definition:define double @bar(double %a) {
+// entry:
+//   %calltmp = call double @foo(double %a, double 4.000000e+00)
+//   %calltmp1 = call double @bar(double 3.133700e+04)
+//   %addtmp = fadd double %calltmp, %calltmp1
+//   ret double %addtmp
+// }
+//
+// ready> extern cos(x);
+// ready> Read extern: declare double @cos(double)
+// ready> cos(1.234);
+// ready> Read top-level expression:define double @1() {
+// entry:
+//   %calltmp = call double @cos(double 1.234000e+00)
+//   ret double %calltmp
+// }
