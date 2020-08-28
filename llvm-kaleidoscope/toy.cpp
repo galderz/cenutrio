@@ -293,9 +293,6 @@ Function *FunctionAST::codegen() {
     if (!TheFunction)
         return nullptr;
 
-    if (!TheFunction->empty())
-        return (Function*)LogErrorV("Function cannot be redefined.");
-
     // Create a new basic block to start insertion into.
     BasicBlock *BB = BasicBlock::Create(TheContext, "entry", TheFunction);
     Builder.SetInsertPoint(BB);
@@ -669,4 +666,14 @@ int main() {
 // entry:
 //   %calltmp = call double @cos(double 1.234000e+00)
 //   ret double %calltmp
+// }
+//
+// ready> def test(x) (1+2+x)*(x+(1+2));
+// ready> Read function definition:
+// define double @test(double %x) {
+// entry:
+//         %addtmp = fadd double 3.000000e+00, %x
+//         %addtmp1 = fadd double %x, 3.000000e+00
+//         %multmp = fmul double %addtmp, %addtmp1
+//         ret double %multmp
 // }
