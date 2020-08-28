@@ -1,4 +1,4 @@
-//#include "../include/KaleidoscopeJIT.h"
+#include "KaleidoscopeJIT.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/BasicBlock.h"
@@ -28,7 +28,7 @@
 #include <vector>
 
 using namespace llvm;
-//using namespace llvm::orc;
+using namespace llvm::orc;
 
 enum Token {
     tok_eof = -1,
@@ -217,6 +217,7 @@ static IRBuilder<> Builder(TheContext);
 static std::unique_ptr<Module> TheModule;
 static std::map<std::string, Value *> NamedValues;
 static std::unique_ptr<legacy::FunctionPassManager> TheFPM;
+static std::unique_ptr<KaleidoscopeJIT> TheJIT;
 
 Value *LogErrorV(const char *Str) {
     LogError(Str);
@@ -528,7 +529,8 @@ static std::unique_ptr<PrototypeAST> ParseExtern() {
 static std::unique_ptr<FunctionAST> ParseTopLevelExpr() {
     if (auto E = ParseExpression()) {
         // Make anonymous proto.
-        auto Proto = std::make_unique<PrototypeAST>("", std::vector<std::string>());
+        // TODO chapter 2 documentation is wrong, name should be "__anon_expr" instead of "", otherwise chapter4 example fails
+        auto Proto = std::make_unique<PrototypeAST>("__anon_expr", std::vector<std::string>());
         return std::make_unique<FunctionAST>(std::move(Proto), std::move(E));
     }
 
@@ -543,6 +545,7 @@ void InitializeModuleAndPassManager(void) {
     // TODO not mentioned in chapter 3 documentation
     // Make the module, which holds all the code.
     TheModule = std::make_unique<Module>("my cool jit", TheContext);
+    TheModule->setDataLayout(TheJIT->getTargetMachine().createDataLayout());
 
     // Create a new pass manager attached to it.
     TheFPM = std::make_unique<legacy::FunctionPassManager>(TheModule.get());
@@ -588,9 +591,32 @@ static void HandleTopLevelExpression() {
     // Evaluate a top-level expression into an anonymous function.
     if (auto FnAST = ParseTopLevelExpr()) {
         if (auto *FnIR = FnAST->codegen()) {
-            fprintf(stderr, "Read top-level expression:");
+            fprintf(stderr, "Read top-level expression:\n");
             FnIR->print(errs());
             fprintf(stderr, "\n");
+
+            // JIT the module containing the anonymous expression,
+            // keeping a handle so we can free it later.
+            auto H = TheJIT->addModule(std::move(TheModule));
+            InitializeModuleAndPassManager();
+
+            // Search the JIT for the __anon_expr symbol.
+            auto ExprSymbol = TheJIT->findSymbol("__anon_expr");
+            assert(ExprSymbol && "Function not found");
+
+            // Get the symbol's address and cast it to the right type
+            // (takes no arguments, returns a double)
+            // so we can call it as a native function.
+
+            // TODO chapter 4 documentation outdated (full source correct), fails with:
+            // toy.cpp:605:44: error: cannot convert 'Expected<llvm::JITTargetAddress>' (aka 'Expected<unsigned long long>') to 'intptr_t' (aka 'long') without a conversion operator
+            //            double (*FP)() = (double (*)())(intptr_t)ExprSymbol.getAddress();
+            //                                           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+            double (*FP)() = (double (*)())(intptr_t)cantFail(ExprSymbol.getAddress());
+            fprintf(stderr, "Evaluated to %f\n", FP());
+
+            // Delete the anonymous expression module from the JIT.
+            TheJIT->removeModule(H);
         }
     } else {
         // Skip token for error recovery.
@@ -622,6 +648,10 @@ static void MainLoop() {
 }
 
 int main() {
+    InitializeNativeTarget();
+    InitializeNativeTargetAsmPrinter();
+    InitializeNativeTargetAsmParser();
+
     // Install standard binary operators.
     // 1 is lowest precedence.
     BinopPrecedence['<'] = 10;
@@ -632,6 +662,8 @@ int main() {
     // Prime the first token.
     fprintf(stderr, "ready> ");
     getNextToken();
+
+    TheJIT = std::make_unique<KaleidoscopeJIT>();
 
     InitializeModuleAndPassManager();
 
@@ -713,7 +745,7 @@ int main() {
 //         %multmp = fmul double %addtmp, %addtmp1
 //         ret double %multmp
 // }
-//
+
 // Chapter 4 - Optimization Passes
 // ready> def test(x) (1+2+x)*(x+(1+2));
 // ready> Read function definition:define double @test(double %x) {
@@ -722,3 +754,34 @@ int main() {
 //   %multmp = fmul double %addtmp, %addtmp
 //   ret double %multmp
 // }
+
+// Chapter 4 - JIT in action
+// ready> 4+5;
+// ready> Read top-level expression:
+// define double @__anon_expr() {
+// entry:
+//   ret double 9.000000e+00
+// }
+//
+// Evaluated to 9.000000
+//
+// ready> def testfunc(x y) x + y*2;
+// ready> Read function definition:define double @testfunc(double %x, double %y) {
+// entry:
+//   %multmp = fmul double %y, 2.000000e+00
+//   %addtmp = fadd double %x, %multmp
+//   ret double %addtmp
+// }
+//
+// ready> testfunc(4, 10);
+// ready> Read top-level expression:
+// define double @__anon_expr() {
+// entry:
+//   %calltmp = call double @testfunc(double 4.000000e+00, double 1.000000e+01)
+//   ret double %calltmp
+// }
+//
+// Evaluated to 24.000000
+// ready> testfunc(5, 10);
+// ready> LogError: Unknown function referenced
+// ^ expected failure

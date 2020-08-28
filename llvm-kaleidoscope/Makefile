@@ -1,3 +1,7 @@
+# Requires LLVM 12 or higher
+# $ llvm-config --version
+# 12.0.0git
+
 all: compile run
 
 # TODO chapter 2 recommendation does not work, see the following to make it work:
