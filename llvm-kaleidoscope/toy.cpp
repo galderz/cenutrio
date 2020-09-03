@@ -331,7 +331,6 @@ Function *FunctionAST::codegen() {
 
     // Record the function arguments in the NamedValues map.
     NamedValues.clear();
-    // TODO fix chapter 3 documentation in Arg.getName() call
     for (auto &Arg : TheFunction->args())
         NamedValues[std::string(Arg.getName())] = &Arg;
 
@@ -545,7 +544,6 @@ static std::unique_ptr<PrototypeAST> ParseExtern() {
 static std::unique_ptr<FunctionAST> ParseTopLevelExpr() {
     if (auto E = ParseExpression()) {
         // Make anonymous proto.
-        // TODO chapter 2 documentation is wrong, name should be "__anon_expr" instead of "", otherwise chapter4 example fails
         auto Proto = std::make_unique<PrototypeAST>("__anon_expr", std::vector<std::string>());
         return std::make_unique<FunctionAST>(std::move(Proto), std::move(E));
     }
@@ -558,7 +556,6 @@ static std::unique_ptr<FunctionAST> ParseTopLevelExpr() {
 //===----------------------------------------------------------------------===//
 
 void InitializeModuleAndPassManager(void) {
-    // TODO not mentioned in chapter 3 documentation
     // Make the module, which holds all the code.
     TheModule = std::make_unique<Module>("my cool jit", TheContext);
     TheModule->setDataLayout(TheJIT->getTargetMachine().createDataLayout());
@@ -628,10 +625,6 @@ static void HandleTopLevelExpression() {
             // (takes no arguments, returns a double)
             // so we can call it as a native function.
 
-            // TODO chapter 4 documentation outdated (full source correct), fails with:
-            // toy.cpp:605:44: error: cannot convert 'Expected<llvm::JITTargetAddress>' (aka 'Expected<unsigned long long>') to 'intptr_t' (aka 'long') without a conversion operator
-            //            double (*FP)() = (double (*)())(intptr_t)ExprSymbol.getAddress();
-            //                                           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
             double (*FP)() = (double (*)())(intptr_t)cantFail(ExprSymbol.getAddress());
             fprintf(stderr, "Evaluated to %f\n", FP());
 
